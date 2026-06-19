@@ -1,0 +1,158 @@
+version: '3.9'
+
+services:
+  # Main RAG application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eira-app
+    ports:
+      - "8501:8501"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - DATABASE_URL=sqlite:////app/data/employees.db
+      - CHROMA_HOST=chroma
+      - CHROMA_PORT=8000
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      chroma:
+        condition: service_healthy
+        required: false
+    networks:
+      - eira-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Chroma vector store (optional - for distributed setup)
+  chroma:
+    image: ghcr.io/chroma-core/chroma:latest
+    container_name: eira-chroma
+    ports:
+      - "8000:8000"
+    environment:
+      - CHROMA_DB_IMPL=duckdb+parquet
+      - PERSIST_DIRECTORY=/chroma/data
+    volumes:
+      - ./data/chroma:/chroma/data
+    networks:
+      - eira-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    profiles:
+      - distributed
+
+  # PostgreSQL for production (optional)
+  postgres:
+    image: postgres:15-alpine
+    container_name: eira-postgres
+    environment:
+      POSTGRES_DB: eira
+      POSTGRES_USER: eira_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - eira-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eira_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - production
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: eira-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - eira-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - production
+
+  # Prometheus for monitoring (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: eira-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - eira-network
+    profiles:
+      - monitoring
+
+  # Grafana for dashboards (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: eira-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - eira-network
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  eira-network:
+    driver: bridge
+
+# Usage:
+#
+# Development (SQLite, embedded Chroma):
+#   docker-compose up app
+#
+# With external Chroma:
+#   docker-compose --profile distributed up
+#
+# With full production stack (PostgreSQL, Redis, etc):
+#   docker-compose --profile production up
+#
+# With monitoring (Prometheus, Grafana):
+#   docker-compose --profile monitoring up
+#
+# All services:
+#   docker-compose --profile production --profile monitoring up

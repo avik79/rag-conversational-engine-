@@ -1,0 +1,216 @@
+name: Security - Scanning & Analysis
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  pull_request:
+    branches: [ master, main, develop ]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  dependency-check:
+    runs-on: ubuntu-latest
+    name: Dependency Check
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run dependency check
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: 'RAG Conversational Engine'
+        path: '.'
+        format: 'JSON'
+        args: >
+          --enableExperimental
+          --enableVerbose
+
+    - name: Upload dependency check report
+      uses: actions/upload-artifact@v3
+      with:
+        name: dependency-check-report
+        path: reports/
+
+  bandit:
+    runs-on: ubuntu-latest
+    name: Bandit Security Linter
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install bandit
+      run: pip install bandit
+
+    - name: Run bandit
+      run: |
+        bandit -r tools models app -f json -o bandit-report.json
+        bandit -r tools models app -f txt || true
+
+    - name: Upload bandit report
+      uses: actions/upload-artifact@v3
+      with:
+        name: bandit-report
+        path: bandit-report.json
+
+  semgrep:
+    runs-on: ubuntu-latest
+    name: Semgrep Static Analysis
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run Semgrep
+      uses: returntocorp/semgrep-action@v1
+      with:
+        generateSarif: true
+        config: >
+          p/security-audit
+          p/python
+          p/owasp-top-ten
+
+    - name: Upload SARIF file
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: semgrep.sarif
+      if: always()
+
+  codeql:
+    runs-on: ubuntu-latest
+    name: CodeQL Analysis
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'python' ]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: ${{ matrix.language }}
+
+    - name: Autobuild
+      uses: github/codeql-action/autobuild@v2
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    name: Secret Scanning
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Scan for secrets with TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ${{ github.event.repository.default_branch }}
+        extra_args: --only-verified --json
+
+  container-scan:
+    runs-on: ubuntu-latest
+    name: Container Image Scan
+    if: github.event_name == 'push'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build Docker image for scanning
+      run: docker build -t eira:scan .
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'eira:scan'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  license-check:
+    runs-on: ubuntu-latest
+    name: License Compliance
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check licenses
+      run: |
+        pip install pip-licenses
+        pip-licenses --format=json --with-urls > licenses.json
+        pip-licenses --format=txt --with-urls > licenses.txt
+
+    - name: Validate licenses
+      run: |
+        # Check for problematic licenses (e.g., GPL)
+        python -c "
+        import json
+        with open('licenses.json') as f:
+            licenses = json.load(f)
+        problematic = ['GPL', 'AGPL']
+        found = [l for l in licenses if any(p in l.get('License', '') for p in problematic)]
+        if found:
+            print('Found problematic licenses:', found)
+            exit(1)
+        "
+
+    - name: Upload licenses
+      uses: actions/upload-artifact@v3
+      with:
+        name: licenses
+        path: licenses.txt
+
+  security-report:
+    needs: [ dependency-check, bandit, semgrep, secret-scan ]
+    runs-on: ubuntu-latest
+    name: Generate Security Report
+    if: always()
+
+    steps:
+    - name: Download all reports
+      uses: actions/download-artifact@v3
+
+    - name: Generate consolidated report
+      run: |
+        cat > security-report.md << 'EOF'
+        # Security Scan Report
+
+        ## Summary
+        - Dependency Check: ${{ needs.dependency-check.result }}
+        - Bandit: ${{ needs.bandit.result }}
+        - Semgrep: ${{ needs.semgrep.result }}
+        - Secret Scan: ${{ needs.secret-scan.result }}
+
+        ## Artifacts
+        - See uploaded reports in Actions artifacts
+        EOF
+
+    - name: Create issue if vulnerabilities found
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: 'Security: Vulnerabilities detected in CI scan',
+            body: 'Security scan found issues. Check the Actions tab for details.',
+            labels: ['security', 'urgent'],
+          })

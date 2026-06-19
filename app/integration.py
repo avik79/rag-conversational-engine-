@@ -27,7 +27,9 @@ class AgentRunContext:
         self.user_name = user_name
         self.tool_calls = []
         self.hitl_decisions = []
+        self.hitl_gates = []  # New: track HITL gates triggered
         self.response = None
+        self.requires_approval = False  # Flag if response blocked by HITL
 
 
 def get_weather_for_location(location: str) -> str:
@@ -285,7 +287,7 @@ async def run_eira_agent(
         # Try database query for employee data
         db_answer = query_employee_database(user_input)
         if db_answer and "Can query employee data" not in db_answer:
-            context.response = EIRAResponse(
+            response = EIRAResponse(
                 answer=db_answer,
                 sources=[SourceCitation(
                     claim=db_answer,
@@ -295,6 +297,11 @@ async def run_eira_agent(
                 confidence=0.95,
                 model_used="database-query",
             )
+
+            # Apply HITL checks before returning
+            await apply_hitl_checks(context, response)
+
+            context.response = response
             return context
 
         system_prompt = f"""You are EIRA, an intelligent assistant.
@@ -388,3 +395,27 @@ def format_response(response: EIRAResponse) -> str:
     output += f"**Confidence**: {response.confidence:.1%}"
 
     return output
+
+
+async def apply_hitl_checks(context: AgentRunContext, response: EIRAResponse) -> None:
+    """Apply human-in-the-loop checks to a response"""
+    from tools.hitl_tools import (
+        check_confidence_threshold,
+        create_approval_request,
+    )
+
+    CONFIDENCE_THRESHOLD = 0.75
+
+    # Check confidence level
+    gate = await check_confidence_threshold(response.confidence, CONFIDENCE_THRESHOLD)
+    if gate:
+        approval_request = await create_approval_request(gate)
+        context.hitl_gates.append(gate)
+        context.hitl_decisions.append(approval_request)
+        context.requires_approval = True
+        logger.warning(
+            f"HITL gate triggered: {gate.trigger_reason} "
+            f"(confidence {response.confidence:.2f} < {CONFIDENCE_THRESHOLD})"
+        )
+
+    # Additional checks could be added here (data freshness, SQL validation, etc.)

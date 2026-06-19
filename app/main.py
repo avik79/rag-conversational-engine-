@@ -101,6 +101,11 @@ async def run_agent_with_hooks(user_input: str):
         # Track HITL gates
         if hasattr(context, 'hitl_decisions') and context.hitl_decisions:
             st.session_state.hitl_queue.extend(context.hitl_decisions)
+            logger.info(f"Added {len(context.hitl_decisions)} HITL requests to queue")
+
+        # If approval required, show warning
+        if hasattr(context, 'requires_approval') and context.requires_approval:
+            st.warning("⚠️ Response requires human approval - check the HITL Gates panel")
 
         # Track tool calls
         if hasattr(context, 'tool_calls') and context.tool_calls:
@@ -172,34 +177,107 @@ def render_chat_interface():
 
 
 def render_hitl_panel():
-    """Render HITL approval sidebar"""
+    """Render HITL approval sidebar with enhanced details"""
     with st.sidebar:
         st.markdown("### 🚨 Human-in-the-Loop Gates")
 
         if not st.session_state.hitl_queue:
-            st.info("No pending approvals")
+            st.info("✓ No pending approvals")
             return
 
-        for i, trigger in enumerate(st.session_state.hitl_queue):
-            with st.container():
-                st.markdown(f"""
-                <div class="hitl-panel">
-                <strong>Gate: {trigger['gate']}</strong><br>
-                {trigger['reason']}
-                </div>
-                """, unsafe_allow_html=True)
+        st.warning(f"⚠️ {len(st.session_state.hitl_queue)} approval(s) pending")
 
-                col1, col2 = st.columns(2)
+        for i, request in enumerate(st.session_state.hitl_queue):
+            gate_id = request.get("gate_id", f"gate_{i}")
+            severity = request.get("severity", "MEDIUM")
+            trigger_reason = request.get("trigger_reason", "unknown")
+            details = request.get("details", {})
+
+            # Severity color coding
+            severity_colors = {
+                "CRITICAL": "🔴",
+                "HIGH": "🟠",
+                "MEDIUM": "🟡",
+                "LOW": "🔵",
+            }
+            severity_icon = severity_colors.get(severity, "⚪")
+
+            with st.container(border=True):
+                st.markdown(f"{severity_icon} **{trigger_reason.replace('_', ' ').title()}**")
+                st.caption(f"Gate ID: {gate_id}")
+
+                # Render reason-specific details
+                if trigger_reason == "low_confidence":
+                    confidence = details.get("confidence", 0)
+                    threshold = details.get("threshold", 0.75)
+                    st.metric("Confidence", f"{confidence:.1%}", delta=f"-{(threshold-confidence):.1%}")
+
+                elif trigger_reason == "ambiguous_match":
+                    entity_type = details.get("entity_type", "entity")
+                    matches = details.get("matches", [])
+                    st.write(f"**Found {len(matches)} possible {entity_type}(s):**")
+                    for match in matches[:5]:
+                        st.caption(f"• {match}")
+                    if len(matches) > 5:
+                        st.caption(f"• ... and {len(matches)-5} more")
+
+                elif trigger_reason == "stale_data":
+                    age = details.get("age_hours", 0)
+                    threshold = details.get("threshold_hours", 6)
+                    st.write(f"Data is **{age:.1f}h old** (threshold: {threshold}h)")
+
+                elif trigger_reason == "location_unresolved":
+                    raw_loc = details.get("raw_location", "")
+                    candidates = details.get("candidates", [])
+                    st.write(f"Could not resolve location: *{raw_loc}*")
+                    if candidates:
+                        st.write("Possible matches:")
+                        for cand in candidates:
+                            st.caption(f"• {cand}")
+
+                elif trigger_reason == "sql_blocked":
+                    issues = details.get("issues", [])
+                    st.write("**Security issues found:**")
+                    for issue in issues:
+                        st.caption(f"⚠️ {issue}")
+
+                elif trigger_reason == "ungrounded_response":
+                    claims = details.get("ungrounded_claims", [])
+                    st.write(f"**{len(claims)} ungrounded claim(s):**")
+                    for claim in claims[:3]:
+                        st.caption(f"• {claim}")
+                    if len(claims) > 3:
+                        st.caption(f"• ... and {len(claims)-3} more")
+
+                # Decision input
+                col1, col2, col3 = st.columns([1, 1, 1.2])
+
                 with col1:
-                    if st.button("Approve", key=f"approve_{i}"):
+                    if st.button("✓ Approve", key=f"approve_{i}", use_container_width=True):
+                        request["decision"] = {
+                            "approved": True,
+                            "reviewed_at": datetime.utcnow().isoformat(),
+                        }
+                        request["pending"] = False
                         st.session_state.hitl_queue.pop(i)
-                        st.success("Approved")
+                        st.success("✓ Approved and continuing...")
                         st.rerun()
+
                 with col2:
-                    if st.button("Deny", key=f"deny_{i}"):
+                    if st.button("✗ Deny", key=f"deny_{i}", use_container_width=True):
+                        request["decision"] = {
+                            "approved": False,
+                            "reviewed_at": datetime.utcnow().isoformat(),
+                        }
+                        request["pending"] = False
                         st.session_state.hitl_queue.pop(i)
-                        st.warning("Denied")
+                        st.warning("✗ Request denied")
                         st.rerun()
+
+                with col3:
+                    if st.button("❓ More Info", key=f"info_{i}", use_container_width=True):
+                        with st.expander("Full Details"):
+                            st.json(request)
 
 
 def render_sidebar():

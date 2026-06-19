@@ -123,9 +123,10 @@ class HITLContext(BaseModel):
         "stale_data",
         "ambiguous_match",
         "sql_blocked",
+        "ungrounded_response",
         "reingestion_overwrite",
     ]
-    draft_response: Optional[str]
+    draft_response: Optional[str] = None
     ungrounded_claims: list[str] = []
     agent_name: str
     session_id: str
@@ -134,7 +135,21 @@ class HITLContext(BaseModel):
 class HITLDecision(BaseModel):
     """Human reviewer's decision"""
     approved: bool
-    reviewer_note: Optional[str]
+    reviewer_note: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    reviewer_id: Optional[str] = None
+
+
+class HITLApprovalRequest(BaseModel):
+    """Human approval request with full context"""
+    gate_id: str
+    trigger_reason: str
+    severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    details: dict
+    timestamp: datetime
+    pending: bool = True
+    decision: Optional[HITLDecision] = None
+    context_data: Optional[dict] = None
 
 
 # ── IRIS (Ingestion & Real-time Intelligence Sync Agent) ────────────

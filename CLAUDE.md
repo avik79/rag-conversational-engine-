@@ -13,7 +13,7 @@ The system uses Claude (claude-3-5-sonnet-20241022) as the primary LLM with GPT-
 
 ## Architecture & Data Flow
 
-**Intent Classification → Parallel Execution → Validation → Grounding Check → Quality Gate → Response**
+**Intent Classification → Parallel Execution → Validation → Grounding Check → HITL Gates → Quality Gate → Response**
 
 1. **EIRA** (Orchestrator) classifies user intent: SQL-only, RAG-only, or cross-domain query
 2. **Parallel Agents Execute:**
@@ -22,12 +22,20 @@ The system uses Claude (claude-3-5-sonnet-20241022) as the primary LLM with GPT-
    - **KIRA** → resolves fuzzy locations to canonical cities (10-city contract enforced across SQL and Chroma metadata)
 3. **AXIOM** → pre-execution query validation (SQL injection checks, filter validation)
 4. **SENTINEL** → post-generation groundedness checking (confidence scoring)
-5. **VERIFIER** → quality assurance gate (semantic relevance, completeness, citations, coherence) ⭐ NEW
-6. **Final Output** → structured EIRAResponse with citations, sources, and confidence scores
+5. **HITL Gates** ⭐ NEW → approval gates for ambiguous/low-confidence responses
+   - Low Confidence Gate (< 0.75 threshold)
+   - Ambiguous Match Gate (multiple candidates)
+   - Stale Data Gate (data > 6 hours old)
+   - Location Unresolved Gate (< 0.80 confidence)
+   - SQL Validation Gate (injection/safety blocks)
+   - Response Validation Gate (ungrounded claims)
+6. **VERIFIER** → quality assurance gate (semantic relevance, completeness, citations, coherence)
+7. **Final Output** → structured EIRAResponse with citations, sources, and confidence scores
 
 **Key Patterns**:
 - Structured I/O schemas (pydantic_io.py) define all agent inputs/outputs for type safety
-- Stale data, ambiguous matches, or low confidence trigger human approval workflows in `tools/hitl_tools.py`
+- HITL gates trigger on confidence < 0.75, ambiguous matches, stale data, or grounding failures
+- Human approval tracked in persistent JSONL audit logs (`logs/hitl/hitl_audit_*.jsonl`)
 - VERIFIER validates response against original question (5-metric quality scoring)
 - If validation fails, VERIFIER triggers re-iteration with specific feedback
 
@@ -35,41 +43,61 @@ The system uses Claude (claude-3-5-sonnet-20241022) as the primary LLM with GPT-
 
 ```
 rag-conversational-engine/
-├── agents/               # [Phase 3+] Agent definitions (placeholder stubs)
-├── tools/               # Function tools (core implementations)
-│   ├── sql_tools.py    # ⭐ ORM query wrappers, SQL validation
-│   ├── chroma_tools.py # ⭐ Vector search operations
-│   ├── tavily_tools.py # Weather/news API client
+├── .github/workflows/         # ⭐ NEW: CI/CD Pipelines
+│   ├── ci.yml                # Testing & quality checks
+│   ├── security.yml          # Security scanning (6 types)
+│   └── cd.yml                # Build & deployment automation
+├── agents/                    # Agent definitions
+├── tools/                     # Function tools (core implementations)
+│   ├── sql_tools.py          # ⭐ ORM query wrappers, SQL validation
+│   ├── chroma_tools.py       # ⭐ Vector search operations
+│   ├── tavily_tools.py       # Weather/news API client
 │   ├── embedding_tools.py
-│   ├── hitl_tools.py   # Human approval workflows
+│   ├── hitl_tools.py         # ⭐ HITL gates & approval system
+│   ├── hitl_audit.py         # ⭐ NEW: Audit logging & analytics
+│   ├── verifier_tools.py     # Quality validation
 │   └── __init__.py
-├── models/             # Data schemas (SQLAlchemy + Pydantic)
-│   ├── employee.py    # ⭐ Employee ORM (500-row dataset)
-│   ├── pydantic_io.py # ⭐ Agent I/O schemas
+├── models/                    # Data schemas (SQLAlchemy + Pydantic)
+│   ├── employee.py           # ⭐ Employee ORM (500-row dataset)
+│   ├── pydantic_io.py        # ⭐ Agent I/O schemas + HITL
 │   └── __init__.py
-├── config/            # Tuning parameters
-│   ├── constants.py   # ⭐ Canonical cities, departments, thresholds
-│   ├── llm_config.py  # Claude/GPT-4o config
+├── config/                    # Tuning parameters
+│   ├── constants.py          # ⭐ Canonical cities, HITL thresholds
+│   ├── llm_config.py         # Claude/GPT-4o config
 │   └── __init__.py
-├── db/                # Database
-│   ├── engine.py      # SQLAlchemy sync/async setup
-│   ├── seed.py        # Deterministic 500-row seeding (Faker seed=42)
+├── guardrails/               # Security layers
+│   ├── sql_safety.py         # SQL injection prevention
+│   ├── input_validation.py   # Input sanitization
+│   ├── output_validation.py  # SENTINEL validation
+│   ├── schema_enforcement.py # Contract enforcement
+│   ├── audit_logger.py       # Compliance tracking
+│   └── GUARDRAILS.md         # Security documentation
+├── db/                       # Database
+│   ├── engine.py             # SQLAlchemy sync/async setup
+│   ├── seed.py               # Deterministic 500-row seeding
 │   └── __init__.py
-├── chroma/            # Vector store
-│   ├── client.py      # Chroma singleton + collection management
+├── chroma/                   # Vector store
+│   ├── client.py             # Chroma singleton + collection
 │   └── __init__.py
-├── app/               # Streamlit UI (entry point)
-│   ├── main.py        # ⭐ Streamlit app entry point
-│   ├── integration.py # ⭐ Anthropic SDK integration, run_eira_agent()
-│   ├── wire_tools.py  # Tool registration for agents
-│   ├── components.py  # UI components
+├── app/                      # Streamlit UI (entry point)
+│   ├── main.py               # ⭐ Streamlit app entry point
+│   ├── integration.py        # ⭐ EIRA orchestration + HITL checks
+│   ├── hitl_dashboard.py     # ⭐ NEW: HITL analytics dashboard
+│   ├── components.py         # UI components
+│   ├── wire_tools.py         # Tool registration
 │   └── __init__.py
-├── tests/             # pytest suite
+├── tests/                    # pytest suite
+│   ├── test_hitl_*.py        # HITL system tests
+│   └── ...
 ├── scripts/
-│   └── validate_env.py # Environment validation
-├── pyproject.toml     # Package config (hatchling backend)
-├── .env.example       # Environment template
-└── README.md
+│   └── validate_env.py       # Environment validation
+├── Dockerfile                # ⭐ NEW: Container image
+├── docker-compose.yml        # ⭐ NEW: Development/prod stacks
+├── .dockerignore             # ⭐ NEW: Docker build optimization
+├── pyproject.toml            # Package config
+├── .env.example              # Environment template
+├── README.md                 # Main documentation
+└── logs/hitl/                # ⭐ NEW: HITL audit logs
 ```
 
 **Key Files** (⭐ = most critical for understanding architecture):
@@ -140,6 +168,9 @@ Boston MA, Atlanta GA, Miami FL, London UK, Toronto CA
 **KIRA resolution threshold**: 0.80 (location ambiguity resolution confidence)
 
 ### Tuning Thresholds (config/constants.py)
+- `HITL_CONFIDENCE_THRESHOLD`: 0.75 ⭐ NEW (gate triggering threshold)
+- `HITL_DATA_FRESHNESS_HOURS`: 6 ⭐ NEW (stale data detection)
+- `HITL_LOCATION_CONFIDENCE`: 0.80 ⭐ NEW (location resolution threshold)
 - `SENTINEL_CONFIDENCE_THRESHOLD`: 0.75 (groundedness checking)
 - `AXIOM_OVERWRITE_THRESHOLD`: 0.80 (filter overwriting)
 - `WEATHER_FRESHNESS_HOURS`: 6 (data staleness detection)
@@ -211,6 +242,64 @@ See **guardrails/GUARDRAILS.md** for comprehensive documentation, module referen
 
 ---
 
+## Human-in-the-Loop (HITL) System ⭐ NEW
+
+The **HITL system** provides production-grade approval workflows for responses that require human review:
+
+**6 Gate Types:**
+1. **Low Confidence Gate** — Triggers when response confidence < 0.75
+2. **Ambiguous Match Gate** — Multiple candidates for entity match
+3. **Stale Data Gate** — Data older than freshness threshold (6h)
+4. **Location Unresolved Gate** — Location resolution confidence < 0.80
+5. **SQL Validation Gate** — SQL injection/security blocks detected
+6. **Response Validation Gate** — Ungrounded claims in response
+
+**Components:**
+- `tools/hitl_tools.py`: Gate classes and validation functions
+- `tools/hitl_audit.py`: JSONL audit logging and analytics
+- `app/hitl_dashboard.py`: Real-time analytics dashboard
+- `app/main.py`: Enhanced sidebar with approval panel
+- `logs/hitl/`: Persistent audit trail
+
+**Quick Integration:**
+```python
+from tools.hitl_tools import check_confidence_threshold, create_approval_request
+
+# Check if gate should trigger
+gate = await check_confidence_threshold(confidence=0.65, threshold=0.75)
+if gate:
+    request = await create_approval_request(gate)
+    context.hitl_decisions.append(request)
+    context.requires_approval = True
+```
+
+See **HITL_GUIDE.md** for comprehensive documentation and **HITL_DASHBOARD.md** for analytics.
+
+---
+
+## CI/CD Pipeline ⭐ NEW
+
+**Production-grade CI/CD** with automated testing, security scanning, and deployment:
+
+**Workflows:**
+- `.github/workflows/ci.yml` — Tests on Python 3.10/3.11/3.12, linting, coverage
+- `.github/workflows/security.yml` — Dependency scanning, SAST, secret detection, container scanning
+- `.github/workflows/cd.yml` — Build, Docker image, staging deployment, production release
+
+**Containerization:**
+- `Dockerfile` — Multi-stage build, non-root user, health checks
+- `docker-compose.yml` — Dev, staging, production, monitoring profiles
+- Auto-push to GitHub Container Registry (ghcr.io)
+
+**Deployment Process:**
+1. Push to main → CI runs, auto-deploy to staging
+2. Create git tag (v*.*) → Full pipeline, manual approval, deploy to prod
+3. GitHub releases auto-created with version artifacts
+
+See **CI_CD_GUIDE.md** and **CI_CD_QUICKSTART.md** for setup.
+
+---
+
 ## VERIFIER Agent — Quality Assurance Gate
 
 The **VERIFIER** agent is the final quality gate before responses reach users. It validates that responses adequately address the original question through 5 metrics:
@@ -279,20 +368,63 @@ See **VERIFIER_GUIDE.md** for comprehensive documentation, validation metrics, a
 - Stale data (weather >6 hours, news >24 hours)
 - Trigger approval workflow via `tools/hitl_tools.py`
 
-## Development Status & Roadmap
+## Development Status & Implementation Status
 
-Per README:
-- **Phase 0**: ✅ COMPLETE (Foundation, dependencies, environment setup)
-- **Phases 1–7**: ⏳ PENDING (Agent implementations, production hardening)
+**Recent Additions (Latest):**
+- ✅ **PHASE 8**: HITL System complete (6 gate types, audit logging, dashboard)
+- ✅ **PHASE 9**: CI/CD Pipeline complete (3 workflows, Docker, staging/prod deployment)
+- ✅ **PHASE 10**: Security hardening, comprehensive documentation
 
-**Note**: Agent definitions in `agents/` are currently placeholder stubs. The actual orchestration happens in `app/integration.py` via the Anthropic SDK with tool-calling capabilities. As agents mature, their implementations will move into the `agents/` directory following the same structural pattern.
+**Complete Phases:**
+- **Phase 0**: ✅ Foundation, dependencies, environment setup
+- **Phase 1**: ✅ Data models & schemas
+- **Phase 2**: ✅ Database & Chroma initialization
+- **Phase 3**: ✅ Agent definitions
+- **Phase 4**: ✅ Tool implementations
+- **Phase 5**: ✅ Streamlit UI
+- **Phase 6**: ✅ Integration & e2e tests
+- **Phase 7**: ✅ Guardrails & security
+- **Phase 8**: ✅ HITL System ⭐ NEW
+- **Phase 9**: ✅ CI/CD Pipeline ⭐ NEW
+
+**Status**: ✅ **PRODUCTION READY** — All core systems implemented and documented
+
+**Note**: Orchestration happens in `app/integration.py` via Anthropic SDK with HITL gates integrated into the response pipeline.
 
 ## Quick Reference: Entry Points
 
 | Entry Point | Purpose | Execute |
 |-----------|---------|---------|
 | **Streamlit App** | Web UI for user queries | `streamlit run app/main.py` |
-| **Agent Orchestrator** | Core EIRA logic | `app/integration.py::run_eira_agent()` |
+| **Agent Orchestrator** | Core EIRA logic with HITL | `app/integration.py::run_eira_agent()` |
+| **HITL Dashboard** | Real-time approval metrics | Built into Streamlit sidebar |
 | **Database Init** | Employee DB setup | `python -m db.seed` |
 | **Vector Store Init** | Chroma initialization | `python -c "from chroma.client import init_chroma; init_chroma()"` |
 | **Environment Check** | Validate .env and API keys | `python scripts/validate_env.py` |
+| **Docker Local Dev** | Container-based development | `docker-compose up app` |
+| **Docker Production** | Full prod stack with monitoring | `docker-compose --profile production --profile monitoring up` |
+| **CI Locally** | Run CI tests before push | `pytest --cov` + `flake8 .` + `mypy tools models app` |
+
+## Documentation Files
+
+**Core Documentation:**
+- `CLAUDE.md` — This file (system architecture + guidance)
+- `README.md` — Main entry point with quick start
+
+**Human-in-the-Loop (HITL):**
+- `HITL_QUICKSTART.md` — 5-minute quick start
+- `HITL_GUIDE.md` — Complete reference (1,200+ lines)
+- `HITL_IMPLEMENTATION_SUMMARY.md` — Implementation details
+
+**CI/CD Pipeline:**
+- `CI_CD_QUICKSTART.md` — 10-minute setup
+- `CI_CD_GUIDE.md` — Complete reference (400+ lines)
+- `CI_CD_IMPLEMENTATION_SUMMARY.md` — Implementation details
+
+**Security & Quality:**
+- `guardrails/GUARDRAILS.md` — Security layers documentation
+- `VERIFIER_GUIDE.md` — Quality assurance agent documentation
+- `DEPLOYMENT_READY_CHECKLIST.md` — Final readiness checklist
+
+**Troubleshooting:**
+- `PYTORCH_WINDOWS_FIX.md` — PyTorch DLL error on Windows
